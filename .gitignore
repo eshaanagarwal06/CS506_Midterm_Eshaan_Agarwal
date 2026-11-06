@@ -1,7 +1,20 @@
+# Data and trained models
 *.csv
 *.parquet
 *.pkl
 *.joblib
+
+# Research
+eda/
+cache/
+predictions/
+
+# Python
 __pycache__/
 .ipynb_checkpoints/
 .venv/
+*.pyc
+
+# Local settings
+.env
+.vscode/
