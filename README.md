@@ -1,188 +1,237 @@
 # Music Review Rating Prediction — Kaggle Midterm
 
-**Kaggle username:** eshaanagarwal06  
-**Best public leaderboard macro-F1:** **0.56669** (Submission 7; final cleaned-code resubmission pending)  
+**Kaggle username:** `eshaanagarwal06`  
+**Final public leaderboard macro-F1:** **0.56589**  
 **Final model:** Ordinal Logistic Regression + ExtraTrees residual correction
 
-The task was to predict ratings from **1 to 5** for music reviews using review text and release/reviewer metadata. The dataset contains **447,583 reviews**: **367,583 labeled reviews** and **80,000 reviews with ratings to predict**. The competition uses **macro-averaged F1**, so performance on less common ratings matters as much as performance on the majority class. I developed the final model by moving from a text-only SVM baseline through engineered metadata, ordinal classification, and nonlinear correction. All models used classical machine learning, without deep learning or boosting.
+The goal of this project was to predict **1–5 music review ratings** from review text and metadata. The dataset contains **447,583 reviews**: **367,583 labeled reviews** and **80,000 unlabeled reviews** whose ratings had to be predicted for Kaggle submission. Because the competition was scored using **macro-averaged F1**, performance on less frequent ratings mattered just as much as performance on the dominant five-star class. My final submission used a hybrid pipeline combining **TF-IDF text features**, **41 engineered metadata features**, **ordinal Logistic Regression**, and a second-stage **ExtraTrees residual correction**.
+
+The overall process was iterative: I first established a strong text baseline, then added structured metadata, then moved to ordinal classification once it became clear that treating ratings as ordered categories helped substantially. After that, I tested whether a nonlinear second stage could fix systematic errors that remained after the ordinal model plateaued.
 
 ## 1. Data Exploration
 
-I inspected the dataset schema, rating distribution, missing values, repeated identifiers, and relationships that could inform feature engineering. The inputs include a review summary, full review text, genres, reviewer/album/artist IDs, review time, and helpful-vote counts.
+I began by examining the dataset structure, target distribution, missing values, repeated reviewer/album/artist identifiers, and general data quality. The provided features included review summary, full review text, genres, reviewer ID, album ID, artist ID, review time, and helpful-vote counts.
 
-The labeled ratings were imbalanced:
+The first important finding was that the labeled ratings were **highly imbalanced**, with nearly half of all labeled reviews receiving five stars. Since the evaluation metric is **macro-F1**, I had to train a model to ensure high precision and recall on all classes, not just on the majority class.
 
-| Rating | Labeled reviews | Share |
-|---|---:|---:|
-| 1 | 39,353 | 10.7% |
-| 2 | 23,476 | 6.4% |
-| 3 | 44,933 | 12.2% |
-| 4 | 80,708 | 22.0% |
-| 5 | 179,113 | 48.7% |
+```mermaid
+xychart-beta
+    title "Labeled Rating Distribution"
+    x-axis ["1", "2", "3", "4", "5"]
+    y-axis "Reviews" 0 --> 180000
+    bar [39353, 23476, 44933, 80708, 179113]
+```
 
-Most text and metadata fields were populated; missing summary/review text was handled during preprocessing. I also found **25 groups of identical normalized review text with conflicting ratings**. These were potential ambiguities to investigate, not necessarily incorrect labels.
+I also found that reviewer, album, and artist repetition behaved very differently. Albums and artists appeared repeatedly, while many reviewers appeared only rarely. In an early holdout analysis, only **44.2%** of reviews had a previously observed reviewer, compared with **97.5%** for albums and **99.3%** for artists. This suggested two things:
 
-A more consequential pattern was the uneven repetition of identifiers. There were about **195,891 reviewers**, **28,570 albums**, and **12,162 artists** in the labeled set. In an initial holdout, only **44.2%** of reviews had a previously observed reviewer, compared with **97.5%** for albums and **99.3%** for artists. This suggested that rating-history information could help, especially for albums and artists, but that the model still needed a strong text-based foundation for unseen reviewers. The large five-star majority, meanwhile, made **macro-F1 rather than accuracy** the appropriate selection criterion.
+1. I needed a **strong text model** because many test reviews would come from unseen reviewers.
+2. Historical rating information for **albums and artists** could still provide useful signal and should be engineered into features.
+
+I also checked missingness and data consistency. There were only **38 missing summaries** and **15 missing review texts**, so missing text was a minor issue. A separate audit found **25 groups containing 82 reviews with identical normalized summary + review text but conflicting ratings**. I treated these as possible ambiguity or label-noise cases, but they were a very small fraction of the data, so I kept them rather than removing them.
+
+These early observations pushed the project toward a **hybrid text + metadata approach** rather than relying only on collaborative filtering or only on raw text.
 
 ## 2. Feature Extraction / Engineering
 
 ### Text features
 
-I used **TF-IDF with word unigrams and bigrams** to represent the summary, review body, and genres. TF-IDF discounts very frequent terms while retaining words and phrases that distinguish reviews; its sparse representation works well with linear classifiers on a dataset of this size. It is a strong **classical baseline**, not a universally best alternative to deep learning. I also experimented with character n-grams, larger vocabularies, supervised n-gram selection, and NB-weighted text features, but those alternatives did not consistently improve the selected model.
+My first strong baseline used **TF-IDF with word unigrams and bigrams**. I chose TF-IDF because it is a proven classical text representation for sparse linear models: it downweights very common words while preserving rare, discriminative phrases. It had better performance than other methods such as bag of words, LSA, character n-grams, supervised n-gram selection, and NB-weighted text features.
 
-The final model fits **separate TF-IDF vectorizers** for the three fields rather than placing everything into one text column:
+I eventually used **separate TF-IDF vectorizers** for summary, review text, and genres rather than concatenating everything into one field, which yielded better results. I did this because those fields play different roles: summaries are short and opinion-dense, review bodies are much longer and more varied, and genres are compact contextual tags rather than sentiment text.
 
 | Field | Maximum vocabulary | Relative weight | Reason |
 |---|---:|---:|---|
-| Summary | 20,000 | 1.0 | Short, concentrated opinion/sentiment cues |
-| Review text | 90,000 | 1.0 | Longer text with greater vocabulary and phrase variety |
-| Genres | 3,000 | 0.5 | Smaller, more repetitive field; useful context but less direct sentiment |
+| Summary | 20,000 | 1.0 | Short field with concentrated opinion phrases |
+| Review text | 90,000 | 1.0 | Longest field with the richest vocabulary |
+| Genres | 3,000 | 0.5 | Smaller repetitive field; useful context but less direct sentiment |
 
-These limits and weights came from the **selected configuration after extensive feature and hyperparameter experiments**. They also constrain vocabulary size and memory use; I do not claim that each exact cutoff is a universal optimum. The final vectorizers use `min_df=2`, sublinear term frequency, Unicode accent normalization, and `float32` sparse matrices.
+The **20,000 / 90,000 / 3,000** vocabulary limits were chosen from many large-scale experiments on feature settings, retaining the configuration that gave the best overall development performance while remaining computationally manageable. The much larger review-text limit reflects the fact that the review body contains most of the useful language variation; the smaller genre limit reflects its much more compact vocabulary.
 
-### Structured metadata: 41 features
 
-I engineered **41 features** to capture information that TF-IDF may miss:
+### Metadata features
 
-| Group | Features | Why included |
+I engineered **41 structured features** to capture information that TF-IDF alone does not express well.
+
+| Group | Feature count | Purpose |
 |---|---:|---|
-| Reviewer, album, artist rating histories | 24 | Counts, smoothed averages, variation, and proportions of ratings 1–5 capture historical tendencies |
-| Genre and reviewer–genre histories | 4 | Capture genre-level expectations and whether a reviewer rates particular genres differently |
-| Static review characteristics | 13 | Summary/review length, punctuation, genre count, helpful votes, review date, and missing-time indicators provide context |
+| Reviewer, album, artist rating histories | 24 | Capture historical behavior through counts, smoothed means, variability, and class proportions |
+| Genre and reviewer–genre features | 4 | Capture genre priors and whether a reviewer rates certain genres differently |
+| Static review characteristics | 13 | Capture review length, punctuation, genre count, voting information, time, and missingness |
 
-The feature groups were selected through experimentation, not assumed to be useful: in an initial matched ablation, removing reviewer features decreased macro-F1 by about **0.0038**, and removing album/artist features decreased it by about **0.0045**. Genre-preference features had a smaller measured contribution. I used **smoothed statistics** to avoid treating ratings from one or two past reviews as reliable averages.
+These features were selected because they matched patterns I saw during exploration. Since reviewers, albums, and artists repeat at different rates, historical rating summaries can be useful. The static features were included because text length, punctuation, helpfulness, and time often reflect review style or certainty.
 
-Because rating-history features depend on the target, I used **four-fold cross-fitting**: each labeled review's target-derived features were calculated from other folds, not from its own score. For test reviews, these statistics were calculated using all available labeled reviews. The 41 features were standardized, clipped to limit extreme values, and given a final model weight of **1.4**, selected during tuning.
+I used **smoothed statistics** for reviewer, album, artist, and genre histories so that one or two observations would not create unstable averages. I also standardized the 41 features and applied a tuned final metadata weight of **1.4** when combining them with the TF-IDF representation.
+
+### Preprocessing and leakage control
+
+Missing text values were replaced with empty strings rather than dropping reviews, since the other fields could still be useful. Vote-related features were safely handled even when counts were missing or zero, and timestamps were converted into year and month features with a missing-time indicator.
+
+Because many metadata features were based on ratings, I used **cross-fitting** when generating them for labeled reviews. This prevented a review’s own rating from leaking into its target-derived features. For the unlabeled Kaggle test reviews, the corresponding statistics were computed using all labeled training reviews.
+
+Overall, the project moved from simple text representations to a richer feature set that combined **what the review says** with **who wrote it, what was reviewed, and the context in which it was written**.
 
 ## 3. Model Creation and Assumptions
 
-### From initial models to ordinal classification
+I tested several families of classical models during the project, including linear SVMs, hybrid linear models, matrix-factorization blends, multinomial classifiers, ordinal models, and nonlinear second-stage models. The main lesson from these experiments was that text alone was useful, metadata improved the baseline, and explicitly modeling the **ordered nature** of ratings helped the most.
 
-I began with **TF-IDF + Linear SVM**, then added metadata and tested reviewer–album/artist **matrix-factorization** blends. I also compared standard multinomial classification, alternative text models (including **NB-SVM**), ensembles, and different ordinal decision rules. These experiments established that text was the strongest starting point, metadata helped, and modeling rating order produced the largest subsequent improvement.
+### Ordinal Logistic Regression
 
-I selected **ordinal Logistic Regression** because ratings have a natural order: confusing 4 with 5 is different from confusing 1 with 5. Instead of one five-class model, I fit four independent binary Logistic Regression classifiers for:
+I selected **ordinal Logistic Regression** for the final submission because the target classes are naturally ordered. Predicting rating 4 instead of 5 is a smaller error than predicting 1 instead of 5, and an ordinal setup can use that structure. Even though macro-averaged f1 doesn't differentiate between the above errors, this helped the model learn from the ordered nature of the ratings. Most of my errors in the final model were within 1 point of the true score.
+
+Instead of training one five-class classifier, I trained four binary Logistic Regression models for:
 
 - `Score > 1`
 - `Score > 2`
 - `Score > 3`
 - `Score > 4`
 
-Their cumulative probabilities are made nonincreasing and converted into five class probabilities. Because the four classifiers have **separately fitted coefficients**, this approach **does not impose the proportional-odds assumption** of a single shared-slope ordinal logit. Logistic Regression also works directly with the sparse TF-IDF features. The final regularization setting was **`C=4`, `solver="liblinear"`**, selected through development experiments.
+These cumulative probabilities were then projected to remain valid and converted into five class probabilities. I preferred this approach because it directly uses the ordering information while still working well with sparse TF-IDF features. In my experiments it gave a clear performance improvement over earlier non-ordinal baselines.
 
-### Nonlinear residual correction
+A second reason this approach was attractive is that the four binary models were trained **independently**, so the final system did **not** rely on the proportional-odds assumption of a single shared-slope ordinal logit.
 
-A linear ordinal model cannot directly capture every interaction between rating history, review characteristics, and uncertainty in its own predictions. I therefore trained an **ExtraTrees regressor** to estimate the residual:
+### ExtraTrees residual correction
 
-`residual = actual rating − out-of-fold expected rating`
+After the ordinal model, I added an **ExtraTrees regressor** as a second stage. The idea was not to replace the ordinal model, but to correct its remaining systematic mistakes.
 
-Its **53 inputs** are the 41 metadata features plus 12 ordinal-output features: four cumulative probabilities, five class probabilities, expected rating, prediction entropy, and the margin between the two largest class probabilities. ExtraTrees averages many randomized trees and can capture nonlinear patterns in this small, dense second-stage feature space. Compared with a conventional Random Forest, its randomized split points offer a different computation/bias–variance trade-off. NB-SVM, meanwhile, was an alternative *text classifier*, not an equivalent nonlinear residual regressor. The ExtraTrees **residual approach won the relevant development comparisons**, which was the decisive reason for choosing it.
+I trained ExtraTrees on the residual:
 
-The resulting residual adjusts the five probabilities using an **exponential probability tilt**, followed by four development-selected thresholds to obtain the final rating.
+`actual rating − expected rating from the ordinal model`
+
+using a compact 53-feature dense representation consisting of:
+
+- the ordinal model’s cumulative probabilities,
+- the derived five-class probabilities,
+- uncertainty summaries such as entropy and margin,
+- and the 41 metadata features.
+
+I chose ExtraTrees because it could model **nonlinear interactions** in this smaller second-stage feature space. It also performed best among the nonlinear residual strategies I tested, including Random Forest and KNN.
+I also tested ExtraTrees as a direct five-class classifier using the ordinal Logistic Regression outputs and metadata features, rather than predicting residual errors. However, this approach underperformed the residual-regression model, suggesting that ExtraTrees was more useful for correcting the existing ordinal predictions than for directly replacing them.
+
+### Probability Tilt and Final Predictions
+
+After ExtraTrees predicts the residual, I apply an **exponential probability tilt** to adjust the ordinal model's five class probabilities. A positive residual shifts probability toward higher ratings, while a negative residual shifts it toward lower ratings. Unlike directly adding the residual to the predicted rating, this preserves a valid probability distribution.
+
+The tilt strength (**1.2**) and scaling parameter (**0.85**) were selected through development experiments. Finally, I convert the adjusted probabilities into four cumulative probabilities and apply the tuned thresholds **[0.45, 0.575, 0.575, 0.575]** to generate the final ratings from 1 to 5, optimizing for macro-F1.
+
+### Final architecture
 
 ```mermaid
-flowchart TD
-    A[Original labeled reviews] --> B[Separate-field TF-IDF + 41 metadata features]
-    B --> C[4 ordinal Logistic Regression cutoffs]
-    C --> D[Out-of-fold probabilities and residuals]
-    D --> E[ExtraTrees residual regressor]
-    A --> F[Full-data ordinal fit]
-    F --> G[Test cumulative probabilities]
-    E --> H[Predicted residual adjustment]
+flowchart TB
+    A["Labeled Reviews"] --> B["Feature Engineering<br/>TF-IDF + 41 Metadata Features"]
+
+    B --> C["Ordinal Logistic Regression<br/>4 Binary Cutoffs"]
+
+    C --> D["4-Fold OOF Predictions"]
+    D --> E["ExtraTrees<br/>Residual Regression"]
+
+    C --> F["Final Ordinal Model<br/>Trained on All Labeled Data"]
+
+    F --> G["Test Review Probabilities"]
+    E --> H["Residual Correction"]
     G --> H
-    H --> I[Frozen thresholds]
-    I --> J[final_submission.csv]
+
+    H --> I["Probability Tilt + Thresholds"]
+    I --> J["final_submission.csv"]
+
+    style A fill:#e8eef7,stroke:#637fa5,color:#1e293b
+    style B fill:#e8eef7,stroke:#637fa5,color:#1e293b
+    style C fill:#e8eef7,stroke:#637fa5,color:#1e293b
+    style D fill:#e8eef7,stroke:#637fa5,color:#1e293b
+    style E fill:#fff0d9,stroke:#c78a27,color:#1e293b
+    style F fill:#e8eef7,stroke:#637fa5,color:#1e293b
+    style G fill:#e8eef7,stroke:#637fa5,color:#1e293b
+    style H fill:#fff0d9,stroke:#c78a27,color:#1e293b
+    style I fill:#e8eef7,stroke:#637fa5,color:#1e293b
+    style J fill:#dff4e8,stroke:#25835e,color:#1e293b
 ```
 
-**Leakage control:** For residual training, I generated four **outer out-of-fold ordinal predictions**, refitting the TF-IDF vocabulary, metadata scaler, and ordinal models inside each fold. Target-dependent metadata in each outer training fold was itself **cross-fitted in four inner folds**. This prevents the baseline prediction used to create a review's residual from being trained on that review's rating. For the final Kaggle fit, I used **all labeled reviews**, with no permanent validation holdout.
+This architecture reflects the story of the project: start with a strong interpretable text baseline, improve it with structured metadata, use an ordinal formulation to better match the target, and then apply a nonlinear correction only after the linear ordinal model stopped giving large gains.
 
 ## 4. Model Tuning
 
-I ran multiple rounds of **large-scale experiments** rather than tuning only the final configuration. Early tests compared text representations and the contribution of metadata. Later tests compared ordinal vs. multiclass models, combined vs. separate text fields, regularization `C`, metadata weights, probability offsets/thresholds, and ensembles. An additional tuning run used a **new random split** and compared **50 candidates** by cross-validation before checking the selected configuration on a holdout.
+I did not jump directly to the final architecture. I ran many large-scale experiments to compare feature sets, models, and tuning choices. Early experiments focused on whether metadata helped, whether separate text fields were better than a single combined field, and whether different regularization levels improved linear models. Later experiments focused on ordinal decision rules, metadata weights, thresholding, ensembles, and nonlinear second-stage correction.
 
-The overnight architecture research then tested nonlinear stackers, tree depth/leaf-size trade-offs, training-set scale, matrix-factorization additions, NB-SVM, character n-grams, and residual correction. It used **294,066 fit reviews (A)**, **25,730 development reviews (B)**, and a **47,787-review locked audit (C)**. The selected ExtraTrees residual variant scored **0.56660 macro-F1 on B**, and its settings were fixed before the audit on C. Many recorded configurations were blends or decision-rule variants, not separate full model trainings.
-
-The final parameters were:
+For the final architecture, the selected settings were:
 
 | Component | Selected settings |
 |---|---|
-| Text | Summary 20k, review 90k, genre 3k; weights `1 / 1 / 0.5` |
-| Ordinal model | Four Logistic Regressions, `C=4`, metadata weight `1.4` |
-| Cross-fitting | Four outer folds; four inner folds for fold-specific metadata |
-| Residual model | ExtraTrees, `800` trees, `min_samples_leaf=5`, `max_features=0.8` |
+| Text representation | Summary 20k, review 90k, genre 3k; weights `1 / 1 / 0.5` |
+| Ordinal model | Four Logistic Regressions with `C = 4` |
+| Metadata combination | Standardized 41 features with final weight `1.4` |
+| Residual model | ExtraTrees with `800` trees, `min_samples_leaf = 5`, `max_features = 0.8` |
 | Probability adjustment | Tilt strength `1.2`, sigma `0.85` |
-| Rating thresholds | `[0.45, 0.575, 0.575, 0.575]` (frozen from development) |
+| Final thresholds | `[0.45, 0.575, 0.575, 0.575]` |
 
-I selected these settings based on the best observed **development performance**, while limiting dependence on any single validation score. The thresholds were optimized for **macro-F1**, where the usual 0.5 cutoff need not be optimal. I did not retune them using Kaggle test labels or after inspecting the locked audit.
+For the above seetings, I conducted many large-scale experiments for hyperparameter and feature tuning and retained the settings that performed best in development.
+
+As the project progressed, one challenge was that most improvements became **very small** once macro-F1 crossed about **0.56**. That made it difficult to tell whether a gain was real or just a product of overfitting to a particular validation split. Because of this, I increasingly emphasized matched comparisons, fresh tuning/evaluation partitions, and an audit-style final check rather than relying on one repeated split.
 
 ## 5. Model Evaluation / Performance
 
-**Macro-F1** averages the F1 score of each of the five rating classes equally, so a model cannot obtain a good score simply by overpredicting the common five-star class.
+The competition metric was **macro-F1**, which gives each class equal importance. This mattered because the dataset was imbalanced and because the hardest classes were not the most frequent ones.
 
-### Kaggle public leaderboard
+My final selected architecture achieved a **locked local audit macro-F1 of 0.56732**. The local audit also showed **66.98% accuracy** and **0.396 mean absolute rating error**.
 
-| Submission | Main change | Public macro-F1 |
-|---|---|---:|
-| 1 | TF-IDF + Linear SVM baseline | 0.46871 |
-| 2 | Add 41 engineered metadata features | 0.48666 |
-| 3 | Add matrix-factorization blend | 0.49214 |
-| 4 | Ordinal Logistic Regression + offsets | 0.54117 |
-| 5 | Separate-field ordinal TF-IDF + thresholds | 0.55918 |
-| 6 | Ordinal ensemble (`C=2` / `C=4`) | 0.56046 |
-| **7** | **Ordinal `C=4` + ExtraTrees residual correction** | **0.56669** |
-| Final cleaned-code rerun | Same selected architecture | *Pending resubmission* |
+The most important evaluation finding was that the model struggled most on **ratings 2 and 3**.
 
-The public score improved by **0.09798 macro-F1 points** from the original baseline to Submission 7. The largest jump came from exploiting the ordered target, while the residual stage provided a smaller final improvement.
+### Per-Class F1 on Locked Local Audit
 
-### Local audit and error analysis
+| Rating | F1 Visualization | Audit F1 |
+|:---:|:---|---:|
+| 1 | ███████████████ | 0.750 |
+| 2 | ███████ | 0.340 |
+| 3 | ████████ | 0.385 |
+| 4 | ██████████ | 0.513 |
+| 5 | █████████████████ | 0.849 |
 
-The selected residual model achieved **0.56732 macro-F1** on the locked local audit, with **66.98% accuracy** and **0.396 mean absolute rating error**. This was approximately **+0.00702 macro-F1** over the corresponding ordinal baseline on that audit. These are **local audit results, not Kaggle scores**.
+This pattern matches the dataset structure. Ratings 2 and 3 have fewer examples than ratings 4 and 5, and their language often overlaps with neighboring classes. Strongly positive and strongly negative reviews were easier to identify; middle ratings were more ambiguous.
 
-| Rating | Audit F1 |
-|---|---:|
-| 1 | 0.750 |
-| 2 | 0.340 |
-| 3 | 0.385 |
-| 4 | 0.513 |
-| 5 | 0.849 |
+Another useful result was that about **83.5% of incorrect audit predictions were off by only one star**, suggesting that the final model generally understood coarse sentiment correctly but still struggled with finer distinctions between adjacent ratings.
 
-Ratings **2 and 3** were the clearest weaknesses. They had fewer labeled examples and appeared harder to distinguish from neighboring ratings using their language. About **83.5% of erroneous audit predictions were off by only one star**, consistent with the difficulty of fine-grained distinctions rather than wholesale reversals. These findings motivated later adjacent-rating specialist experiments, but they did **not** reliably beat the selected baseline.
+These results support the final modeling decisions: TF-IDF gave a strong text backbone, metadata added context, ordinal modeling captured target structure, and ExtraTrees residual correction provided an additional but smaller improvement once the main gains had already been achieved.
 
 ## 6. Struggles / Issues / Open Questions
 
-**Memory and runtime.** Training large tree ensembles and repeated complete ordinal pipelines was expensive on my **16 GB RAM** machine. This limited the practical number and scale of experiments. I controlled memory through sparse `float32` text matrices, the 53-feature dense residual representation, limited ExtraTrees parallelism, and deliberate feature/leaf-size settings.
+The biggest practical issue was **memory and runtime**, especially once I started scaling the ExtraTrees residual stage and repeating large model fits. I worked on a machine with **16 GB RAM**, so I had to make careful choices about sparse matrices, feature limits, model size, and how many experiments I could realistically run.
 
-**Separating real gains from validation overfitting.** After macro-F1 passed about **0.56**, many changes improved scores by less than one percentage point. Reusing the same holdout made small gains hard to trust, but changing splits made raw scores less directly comparable. I used matched comparisons, cross-validation, fresh development splits, and a frozen final audit to reduce this risk, while recognizing that extensive search can still overfit model-selection decisions.
+A second challenge was that after the score improved past about **0.56 macro-F1**, many candidate models differed by **less than 1%**. That made it hard to know whether a new idea truly generalized or whether it had simply adapted to a particular validation split. Using the same split repeatedly risks overfitting model selection, while using different splits makes results less directly comparable. Designing a fair evaluation process became almost as important as the model design itself.
 
-**Middle ratings.** Two- and three-star reviews remained difficult because they were less frequent and their language often overlapped with adjacent ratings. With more time, I would run larger, better-controlled experiments and examine which phrases and reviewer/album contexts distinguish ratings **2 vs. 3** and **3 vs. 4**, then test targeted improvements on fresh evaluation data.
+A third issue was that the model consistently performed worst on **ratings 2 and 3**. These were both less common and linguistically more difficult to separate from adjacent ratings. To address this, I experimented with specialized binary Logistic Regression classifiers trained to distinguish 2 vs. 3 and 3 vs. 4 reviews using TF-IDF features. I then tested combining their predictions with the existing ordinal model's probabilities through a second-stage classifier. This reduced the evaluation score. If I had more time, I would focus less on broad architecture changes and more on studying what specifically distinguishes **2 vs. 3** and **3 vs. 4** reviews, then testing targeted improvements for those middle classes on fresh evaluation data.
 
 ## Reproducing the Final Submission
 
-Place the original `train.csv` and `test.csv` alongside `final_submission.py`:
-
-```text
-CS506_Midterm_Eshaan_Agarwal/
-├── README.md
-├── requirements.txt
-├── .gitignore
-├── final_submission.py
-├── train.csv          # local only; not committed to GitHub
-└── test.csv           # local only; not committed to GitHub
-```
-
-Run:
+Place the original `train.csv` and `test.csv` in the same folder as `final_submission.py`, then run:
 
 ```bash
 python -m pip install -r requirements.txt
 python final_submission.py
 ```
 
-The script trains from the original CSVs. It uses all labeled reviews for the final models and writes **`final_submission.csv`** next to the script. The fixed random seed is `20261107`. Full training can be memory- and time-intensive; the script does not report a validation score on the competition test set.
+The script retrains the selected model from the original data and writes **`final_submission.csv`** in the same folder. The output contains exactly two columns: **`id`** and **`Score`**.
 
+## References, Method Sources, and AI Use
 
-## References and AI Use
+The references below explain the methods I investigated and why they were reasonable to try. They are **not** a claim that every final choice came directly from a paper. In several cases, I used AI-assisted research to identify classical models that were not covered in class, then evaluated them myself through experiments.
 
-- Frank, E., & Hall, M. (2001). [*A simple approach to ordinal classification*](https://researchcommons.waikato.ac.nz/entities/publication/ce0009f5-92fa-4113-b8b2-7ac929cfd32c). Background for reducing ordered labels to binary threshold tasks; my implementation uses independent Logistic Regression models.
-- Geurts, P., Ernst, D., & Wehenkel, L. (2006). [*Extremely randomized trees*](https://doi.org/10.1007/s10994-006-6226-1). *Machine Learning, 63*, 3–42. Basis for the ExtraTrees residual model.
-- Scikit-learn documentation: [TF-IDF Vectorizer](https://scikit-learn.org/stable/modules/generated/sklearn.feature_extraction.text.TfidfVectorizer.html), [Logistic Regression](https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html), [ExtraTrees Regressor](https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.ExtraTreesRegressor.html), and [F1 score](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.f1_score.html). Used for implementation details and evaluation definitions.
+- **TF-IDF / text representation**  
+  Manning, C. D., Raghavan, P., & Schütze, H. (2008). *Introduction to Information Retrieval*. Cambridge University Press. https://nlp.stanford.edu/IR-book/  
+  Scikit-learn documentation: *Text feature extraction / TF-IDF*. https://scikit-learn.org/stable/modules/feature_extraction.html#tfidf-term-weighting  
+  These sources explain why TF-IDF is a strong sparse text representation for classical models.
 
-I used AI tools, as permitted by the assignment, to help research unfamiliar methods, develop and refine experimental code, interpret results, and improve the reproducibility and documentation of the final pipeline. Model choices and reported performance are based on the experiments and submissions described above. No external training dataset or pretrained model is required by the final submission script.
+- **Ordinal classification**  
+  Frank, E., & Hall, M. (2001). *A Simple Approach to Ordinal Classification*. https://researchcommons.waikato.ac.nz/entities/publication/ce0009f5-92fa-4113-b8b2-7ac929cfd32c  
+  This was a useful conceptual source because my target variable was ordered from 1 to 5, and the paper explains how ordinal outcomes can be modeled through threshold-based binary tasks.
+
+- **ExtraTrees**  
+  Geurts, P., Ernst, D., & Wehenkel, L. (2006). *Extremely Randomized Trees*. *Machine Learning, 63*(1), 3–42. https://doi.org/10.1007/s10994-006-6226-1  
+  This provided the basis for using ExtraTrees as a nonlinear tree ensemble. I tested it as a second-stage residual corrector and kept it because it improved development performance.
+
+- **NB-SVM (explored, not selected)**  
+  Wang, S., & Manning, C. D. (2012). *Baselines and Bigrams: Simple, Good Sentiment and Topic Classification*. https://aclanthology.org/P12-2018/  
+  This paper motivated testing NB-SVM-style text features as an alternative sentiment baseline, although it was not part of the final model.
+
+- **Stacking / out-of-fold training**  
+  Scikit-learn documentation: *Stacked generalization*. https://scikit-learn.org/stable/modules/ensemble.html#stacked-generalization  
+  This helped support the second-stage residual-learning setup using out-of-fold predictions.
+
+**AI use disclosure:** I used ChatGPT, as permitted by the assignment, to help identify unfamiliar classical modeling approaches, understand their assumptions, write and debug experimental code, interpret results, and prepare the final reproducible script and README. In particular, ordinal threshold modeling and ExtraTrees residual correction were developed through AI-assisted exploration and then validated using my own local experiments and Kaggle submissions. I did not use external labeled data, neural networks, pretrained models, or boosting in the final submission.
