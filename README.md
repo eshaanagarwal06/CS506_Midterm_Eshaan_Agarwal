@@ -1,7 +1,8 @@
 # Music Review Rating Prediction — Kaggle Midterm
 
 **Kaggle username:** `eshaanagarwal06`  
-**Final public leaderboard macro-F1:** **0.56589**  
+**Final public leaderboard macro-F1:** **0.56589**
+**Final private leaderboard macro-F1:** **0.57268**
 **Final model:** Ordinal Logistic Regression + ExtraTrees residual correction
 
 The goal of this project was to predict **1–5 music review ratings** from review text and metadata. The dataset contains **447,583 reviews**: **367,583 labeled reviews** and **80,000 unlabeled reviews** whose ratings had to be predicted for Kaggle submission. Because the competition was scored using **macro-averaged F1**, performance on less frequent ratings mattered just as much as performance on the dominant five-star class. My final submission used a hybrid pipeline combining **TF-IDF text features**, **41 engineered metadata features**, **ordinal Logistic Regression**, and a second-stage **ExtraTrees residual correction**.
@@ -124,7 +125,7 @@ flowchart TB
     C --> D["4-Fold OOF Predictions"]
     D --> E["ExtraTrees<br/>Residual Regression"]
 
-    C --> F["Final Ordinal Model<br/>Trained on All Labeled Data"]
+    B --> F["Final Ordinal Model<br/>Trained on All Labeled Data"]
 
     F --> G["Test Review Probabilities"]
     E --> H["Residual Correction"]
@@ -149,22 +150,34 @@ This architecture reflects the story of the project: start with a strong interpr
 
 ## 4. Model Tuning
 
-I did not jump directly to the final architecture. I ran many large-scale experiments to compare feature sets, models, and tuning choices. Early experiments focused on whether metadata helped, whether separate text fields were better than a single combined field, and whether different regularization levels improved linear models. Later experiments focused on ordinal decision rules, metadata weights, thresholding, ensembles, and nonlinear second-stage correction.
+I conducted several rounds of large-scale experiments comparing feature representations, model architectures, regularization, metadata weights, probability thresholds, and nonlinear residual correction. I initially used matched validation splits to compare individual changes, then moved to new development partitions and a locked audit set to reduce the risk of overfitting model selection.
 
-For the final architecture, the selected settings were:
+Some important findings from these experiments were:
 
-| Component | Selected settings |
+| Experiment | Macro-F1 Comparison | Finding |
+|---|---|---|
+| Adding metadata to the text baseline | 0.46520 → 0.48238 | Improved macro-F1 by **0.01718** |
+| Tuning ordinal decision thresholds (`C=4`) | 0.53980 → 0.55255 | Improved macro-F1 by **0.01275** |
+| Tuned ordinal ensemble vs. C=4 baseline (new holdout) | 0.56058 → 0.56071 | Improvement of only **0.00013**, too small to provide strong evidence of an advantage |
+| ExtraTrees residual correction vs. C=4 ordinal baseline (development B) | 0.55600 → 0.56660 | Improved macro-F1 by **0.01060** |
+| ExtraTrees residual correction vs. ordinal baseline (locked audit C) | 0.56030 → 0.56732 | Improved macro-F1 by **0.00702**, supporting the selected architecture |
+
+*Comparisons within each row use the same evaluation data; results across different experimental splits should not be compared directly.*
+
+The final selected parameters were:
+
+| Component | Selected Settings |
 |---|---|
-| Text representation | Summary 20k, review 90k, genre 3k; weights `1 / 1 / 0.5` |
-| Ordinal model | Four Logistic Regressions with `C = 4` |
-| Metadata combination | Standardized 41 features with final weight `1.4` |
-| Residual model | ExtraTrees with `800` trees, `min_samples_leaf = 5`, `max_features = 0.8` |
-| Probability adjustment | Tilt strength `1.2`, sigma `0.85` |
-| Final thresholds | `[0.45, 0.575, 0.575, 0.575]` |
+| TF-IDF | Summary: 20k, Review: 90k, Genres: 3k; weights `1 / 1 / 0.5` |
+| Ordinal Logistic Regression | Four binary models, `C = 4` |
+| Metadata | 41 standardized features, weight `1.4` |
+| ExtraTrees Regressor | `800` trees, `min_samples_leaf = 5`, `max_features = 0.8` |
+| Probability Tilt | Strength `1.2`, sigma `0.85` |
+| Decision Thresholds | `[0.45, 0.575, 0.575, 0.575]` |
 
-For the above seetings, I conducted many large-scale experiments for hyperparameter and feature tuning and retained the settings that performed best in development.
+These settings were selected through extensive development experiments rather than from theoretical defaults alone. In the overnight research, the selected ExtraTrees configuration achieved **0.56660 macro-F1** on development partition B, compared with **0.55999** for the tuned ordinal ensemble. I froze the chosen architecture and thresholds before evaluating it on the separate audit partition C.
 
-As the project progressed, one challenge was that most improvements became **very small** once macro-F1 crossed about **0.56**. That made it difficult to tell whether a gain was real or just a product of overfitting to a particular validation split. Because of this, I increasingly emphasized matched comparisons, fresh tuning/evaluation partitions, and an audit-style final check rather than relying on one repeated split.
+As performance approached 0.56 macro-F1, improvements became increasingly small and difficult to distinguish from validation overfitting. This motivated using matched comparisons, fresh evaluation splits, and a final locked audit instead of continually optimizing against the same holdout.
 
 ## 5. Model Evaluation / Performance
 
